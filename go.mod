@@ -20,8 +20,6 @@ replace golang.org/x/mod => github.com/golang/mod v0.12.0
 
 replace golang.org/x/tools => github.com/golang/tools v0.13.0
 
-replace golang.org/x/crypto => github.com/golang/crypto v0.14.0
-
 replace golang.org/x/term => github.com/golang/term v0.13.0
 
 replace golang.org/x/exp => github.com/golang/exp v0.0.0-20230905200255-921286631fa9

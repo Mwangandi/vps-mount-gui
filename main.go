@@ -7,6 +7,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -14,17 +15,20 @@ import (
 func main() {
 	cfg := LoadConfig()
 
-	a := app.New()
+	a := app.NewWithID("com.pantech.vps-mount-gui")
 	appTheme := &burpTheme{}
 	a.Settings().SetTheme(appTheme)
 
 	w := a.NewWindow("VPS Mount Manager")
-	w.Resize(fyne.NewSize(980, 640))
+	w.Resize(fyne.NewSize(780, 520))
+
+	var refreshStatusBar func()
 
 	// ── Zoom (scales text/icon sizes app-wide via the theme) ──
 	applyZoom := func(delta float32) {
 		if adjustZoom(delta) {
 			a.Settings().SetTheme(appTheme) // re-applying forces a full re-layout
+			refreshStatusBar()
 		}
 	}
 	onZoomIn := func() { applyZoom(zoomStep) }
@@ -34,11 +38,16 @@ func main() {
 	logBox := widget.NewMultiLineEntry()
 	logBox.Wrapping = fyne.TextWrapWord
 	logBox.Disable()
+	latestActivity := ""
 
 	appendLog := func(msg string) {
 		ts := time.Now().Format("15:04:05")
 		logBox.SetText(logBox.Text + fmt.Sprintf("[%s] %s\n", ts, msg))
 		logBox.CursorRow = len(logBox.Text)
+		latestActivity = msg
+		if refreshStatusBar != nil {
+			refreshStatusBar()
+		}
 	}
 	clearLog := func() {
 		logBox.SetText("")
@@ -46,14 +55,25 @@ func main() {
 
 	// ── Status bar ───────────────────────────────────────────
 	statusBar := widget.NewLabel("")
-	refreshStatusBar := func() {
+	zoomPercentLabel := widget.NewLabel("")
+	zoomOutBtn := widget.NewButtonWithIcon("", theme.ZoomOutIcon(), onZoomOut)
+	zoomInBtn := widget.NewButtonWithIcon("", theme.ZoomInIcon(), onZoomIn)
+	statusBarContent := container.NewHBox(statusBar, layout.NewSpacer(), zoomPercentLabel, zoomOutBtn, zoomInBtn)
+	refreshStatusBar = func() {
 		mounted := 0
 		for _, t := range cfg.Targets {
 			if isMounted(targetMountPath(&cfg, t)) {
 				mounted++
 			}
 		}
-		statusBar.SetText(fmt.Sprintf("●  %d / %d mounted    |    base folder: %s", mounted, len(cfg.Targets), cfg.BaseMountDir))
+		activity := latestActivity
+		if activity == "" {
+			activity = fmt.Sprintf("●  %d / %d mounted    |    base folder: %s", mounted, len(cfg.Targets), cfg.BaseMountDir)
+		} else {
+			activity = fmt.Sprintf("●  %d / %d mounted    |    %s", mounted, len(cfg.Targets), activity)
+		}
+		statusBar.SetText(activity)
+		zoomPercentLabel.SetText(fmt.Sprintf("Zoom: %.0f%%", uiZoom*100))
 	}
 
 	// ── Target status list: shows ONLY currently-mounted targets,
@@ -115,10 +135,15 @@ func main() {
 	//    header to a second row, so opening more tabs never pushes the
 	//    content area further down. ──
 	tabs := container.NewDocTabs(
-		container.NewTabItem("Status", container.NewBorder(nil, statusBar, nil, nil, split)),
+		container.NewTabItem("Status", container.NewBorder(nil, statusBarContent, nil, nil, split)),
 	)
 
+	var refreshAll func()
 	openTerminal := func(server Server) {
+		if server.Host != "" {
+			cfg.MarkServerUsed(server.Name)
+			refreshAll()
+		}
 		openTerminalTab(tabs, server)
 	}
 	openEditor := func(rootPath, label string) {
@@ -131,7 +156,6 @@ func main() {
 	openSection := ""
 	sidebarHolder := container.NewStack()
 
-	var refreshAll func()
 	var rebuildSidebar func()
 
 	rebuildSidebar = func() {
@@ -169,6 +193,16 @@ func main() {
 
 	refreshAll()
 	appendLog("VPS Mount Manager ready. Config: " + configPath())
+
+	// Periodic poller: detect external mount/unmount changes (e.g. user
+	// unmounted via file manager) and refresh UI. Runs every 5 seconds.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			a.Driver().DoFromGoroutine(func() { refreshAll() }, false)
+		}
+	}()
 
 	w.ShowAndRun()
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -29,26 +30,90 @@ type paneBackend struct {
 	displayName  func(path string) string
 }
 
+type treeCache struct {
+	backend  paneBackend
+	mu       sync.RWMutex
+	children map[string][]string
+	isDir    map[string]bool
+	loading  map[string]bool
+}
+
+func newTreeCache(backend paneBackend) *treeCache {
+	return &treeCache{
+		backend:  backend,
+		children: make(map[string][]string),
+		isDir:    make(map[string]bool),
+		loading:  make(map[string]bool),
+	}
+}
+
+func (c *treeCache) loadChildren(id string, tree *widget.Tree, appendLog func(string)) {
+	c.mu.Lock()
+	if c.loading[id] {
+		c.mu.Unlock()
+		return
+	}
+	c.loading[id] = true
+	c.mu.Unlock()
+
+	children, err := c.backend.listChildren(id)
+	if err != nil {
+		appendLog(fmt.Sprintf("✘ Listing %s failed: %v", id, err))
+	}
+
+	c.mu.Lock()
+	c.children[id] = children
+	c.loading[id] = false
+	for _, child := range children {
+		isDir := c.backend.isDir(child)
+		c.isDir[child] = isDir
+	}
+	c.mu.Unlock()
+
+	fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+		tree.Refresh()
+	}, false)
+}
+
+func (c *treeCache) listChildren(id string, tree *widget.Tree) []widget.TreeNodeID {
+	c.mu.RLock()
+	children, ok := c.children[id]
+	c.mu.RUnlock()
+	if !ok {
+		go c.loadChildren(id, tree, func(string) {})
+		return nil
+	}
+	ids := make([]widget.TreeNodeID, len(children))
+	for i, child := range children {
+		ids[i] = widget.TreeNodeID(child)
+	}
+	return ids
+}
+
+func (c *treeCache) isDirCached(id string) bool {
+	if id == "" {
+		return true
+	}
+	c.mu.RLock()
+	isDir, ok := c.isDir[id]
+	c.mu.RUnlock()
+	if ok {
+		return isDir
+	}
+	return true
+}
+
 // buildPane builds a lazily-loaded tree for a backend. onSelect fires with
 // the selected node's id (a full path) whenever the user clicks a row.
 func buildPane(backend paneBackend, onSelect func(id string)) *widget.Tree {
-	tree := widget.NewTree(
+	cache := newTreeCache(backend)
+	var tree *widget.Tree
+	tree = widget.NewTree(
 		func(id widget.TreeNodeID) []widget.TreeNodeID {
-			children, err := backend.listChildren(string(id))
-			if err != nil {
-				return nil
-			}
-			ids := make([]widget.TreeNodeID, len(children))
-			for i, c := range children {
-				ids[i] = widget.TreeNodeID(c)
-			}
-			return ids
+			return cache.listChildren(string(id), tree)
 		},
 		func(id widget.TreeNodeID) bool {
-			if id == "" {
-				return true
-			}
-			return backend.isDir(string(id))
+			return cache.isDirCached(string(id))
 		},
 		func(branch bool) fyne.CanvasObject {
 			icon := widget.NewIcon(theme.FileIcon())
@@ -68,6 +133,7 @@ func buildPane(backend paneBackend, onSelect func(id string)) *widget.Tree {
 		},
 	)
 	tree.Root = ""
+	cache.loadChildren("", tree, func(string) {})
 	tree.OnSelected = func(id widget.TreeNodeID) { onSelect(string(id)) }
 	return tree
 }
@@ -83,6 +149,21 @@ func promptText(w fyne.Window, title, label, initial string, onConfirm func(stri
 			return
 		}
 		onConfirm(entry.Text)
+	}, w)
+}
+
+func showBookmarkJumpDialog(w fyne.Window, title string, options []string, onSelect func(string)) {
+	if len(options) == 0 {
+		return
+	}
+	selectWidget := widget.NewSelect(options, nil)
+	selectWidget.SetSelected(options[0])
+	form := []*widget.FormItem{widget.NewFormItem("Bookmark", wideField(selectWidget, 320))}
+	dialog.ShowForm(title, "Jump", "Cancel", form, func(ok bool) {
+		if !ok || selectWidget.Selected == "" {
+			return
+		}
+		onSelect(selectWidget.Selected)
 	}, w)
 }
 
@@ -228,7 +309,7 @@ func downloadRecursive(client *sftp.Client, remoteRoot, localDestDir string, sta
 // show/hide toggle. Symlinks are shown as plain files/folders based on
 // their target's type but are not followed during recursive
 // upload/download (see uploadRecursive/downloadRecursive above).
-func buildSFTPBrowserContent(w fyne.Window, client *sftp.Client, s Server, appendLog func(string)) fyne.CanvasObject {
+func buildSFTPBrowserContent(w fyne.Window, client *sftp.Client, s Server, cfg *Config, appendLog func(string)) fyne.CanvasObject {
 	localHome, err := os.UserHomeDir()
 	if err != nil || localHome == "" {
 		localHome = "/"
@@ -413,11 +494,41 @@ func buildSFTPBrowserContent(w fyne.Window, client *sftp.Client, s Server, appen
 			refreshLocal()
 		}, w)
 	})
+	localBookmark := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
+		bookmarkPath := localSelected
+		if bookmarkPath == "" {
+			bookmarkPath = localHome
+		}
+		if localSelected != "" && !localSelectedIsDir {
+			bookmarkPath = filepath.Dir(localSelected)
+		}
+		if cfg != nil {
+			cfg.AddLocalBookmark(bookmarkPath)
+			appendLog("✔ Bookmarked local path " + bookmarkPath)
+		} else {
+			appendLog("✘ No config available to save local bookmark")
+		}
+	})
+	localJump := widget.NewButtonWithIcon("", theme.NavigateNextIcon(), func() {
+		if cfg == nil || len(cfg.LocalBookmarks) == 0 {
+			appendLog("✘ No local bookmarks available")
+			return
+		}
+		showBookmarkJumpDialog(w, "Jump to Local Bookmark", cfg.LocalBookmarks, func(selected string) {
+			if selected == "" {
+				return
+			}
+			localSelected = selected
+			localSelectedIsDir = true
+			refreshLocal()
+			appendLog("✔ Jumped to local bookmark " + selected)
+		})
+	})
 	localRefreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() { refreshLocal() })
 	localToolbar := container.NewHBox(
 		widget.NewLabelWithStyle("Local", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		layout.NewSpacer(),
-		localNewFolder, localRename, localDelete, localRefreshBtn,
+		localBookmark, localJump, localNewFolder, localRename, localDelete, localRefreshBtn,
 	)
 
 	// ── Remote toolbar ─────────────────────────────────────────
@@ -475,11 +586,50 @@ func buildSFTPBrowserContent(w fyne.Window, client *sftp.Client, s Server, appen
 			refreshRemote()
 		}, w)
 	})
+	remoteBookmark := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
+		bookmarkPath := remoteSelected
+		if bookmarkPath == "" {
+			bookmarkPath = remoteHome
+		}
+		if remoteSelected != "" && !remoteSelectedIsDir {
+			bookmarkPath = path.Dir(remoteSelected)
+		}
+		if cfg != nil {
+			cfg.AddRemoteBookmark(s.Name, bookmarkPath)
+			appendLog("✔ Bookmarked remote path " + bookmarkPath)
+		} else {
+			appendLog("✘ No config available to save remote bookmark")
+		}
+	})
+	remoteJump := widget.NewButtonWithIcon("", theme.NavigateNextIcon(), func() {
+		if cfg == nil || len(cfg.Servers) == 0 {
+			appendLog("✘ No remote bookmarks available")
+			return
+		}
+		server, ok := cfg.ServerByName(s.Name)
+		if !ok {
+			appendLog("✘ Server not found")
+			return
+		}
+		if len(server.Bookmarks) == 0 {
+			appendLog("✘ No remote bookmarks available for this server")
+			return
+		}
+		showBookmarkJumpDialog(w, "Jump to Remote Bookmark", server.Bookmarks, func(selected string) {
+			if selected == "" {
+				return
+			}
+			remoteSelected = selected
+			remoteSelectedIsDir = true
+			refreshRemote()
+			appendLog("✔ Jumped to remote bookmark " + selected)
+		})
+	})
 	remoteRefreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() { refreshRemote() })
 	remoteToolbar := container.NewHBox(
 		widget.NewLabelWithStyle("Remote", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		layout.NewSpacer(),
-		remoteNewFolder, remoteRename, remoteDelete, remoteRefreshBtn,
+		remoteBookmark, remoteJump, remoteNewFolder, remoteRename, remoteDelete, remoteRefreshBtn,
 	)
 
 	// ── Transfer buttons ───────────────────────────────────────
@@ -563,10 +713,46 @@ func buildSFTPBrowserContent(w fyne.Window, client *sftp.Client, s Server, appen
 	outerSplit.Offset = 0.45
 
 	connLabel := widget.NewLabelWithStyle(
-		fmt.Sprintf("Connected to %s (%s@%s)", s.Name, s.User, s.Host),
+		fmt.Sprintf("Connected to %s (%s@%s) — Drop files here to upload", s.Name, s.User, s.Host),
 		fyne.TextAlignLeading, fyne.TextStyle{Bold: true},
 	)
 	bottomBar := container.NewBorder(nil, nil, statusLabel, nil, progressBar)
+
+	w.SetOnDropped(func(pos fyne.Position, uris []fyne.URI) {
+		if len(uris) == 0 {
+			return
+		}
+		destDir := dirForRemoteAction()
+		go func() {
+			for _, uri := range uris {
+				pathValue := uri.Path()
+				if pathValue == "" {
+					continue
+				}
+				info, err := os.Lstat(pathValue)
+				if err != nil {
+					appendLog("✘ Drop upload failed: " + err.Error())
+					continue
+				}
+				setStatus("Uploading " + filepath.Base(pathValue) + "...")
+				var uerr error
+				if info.IsDir() {
+					uerr = uploadRecursive(client, pathValue, destDir, setStatus, setProgress)
+				} else {
+					uerr = uploadFile(client, pathValue, path.Join(destDir, filepath.Base(pathValue)), setProgress)
+				}
+				setProgress(0)
+				if uerr != nil {
+					appendLog("✘ Drop upload failed: " + uerr.Error())
+					setStatus("Upload failed.")
+				} else {
+					appendLog(fmt.Sprintf("✔ Dropped '%s' to %s", filepath.Base(pathValue), destDir))
+					setStatus("Ready.")
+					refreshRemote()
+				}
+			}
+		}()
+	})
 
 	return container.NewBorder(connLabel, bottomBar, nil, nil, outerSplit)
 }

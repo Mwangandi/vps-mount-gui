@@ -117,6 +117,12 @@ sudo apt install sshfs fuse3 micro
 - `~/.config/vps-mount-gui/known_hosts` — new this round; OpenSSH
   known_hosts format.
 
+## New features
+
+- Connection profiles with favorites, recent servers, and quick-connect actions.
+- SFTP bookmarks for local and remote paths, plus jump-to-bookmark shortcuts.
+- Drag-and-drop uploads into the current remote SFTP directory from the browser window.
+
 ## Rebuilding from source
 
 ```bash

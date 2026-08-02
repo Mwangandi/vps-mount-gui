@@ -41,6 +41,7 @@ func showAddServerDialog(w fyne.Window, cfg *Config, onDone func()) {
 	portEntry.SetText("22")
 	rdpPortEntry := widget.NewEntry()
 	rdpPortEntry.SetText("3389")
+	favoriteCheck := widget.NewCheck("Favorite (show in Quick Connect)", nil)
 
 	form := []*widget.FormItem{
 		widget.NewFormItem("Server Name", wideField(nameEntry, 320)),
@@ -48,6 +49,7 @@ func showAddServerDialog(w fyne.Window, cfg *Config, onDone func()) {
 		widget.NewFormItem("Host / IP", wideField(hostEntry, 320)),
 		widget.NewFormItem("SSH Port", wideField(portEntry, 120)),
 		widget.NewFormItem("RDP Port", wideField(rdpPortEntry, 120)),
+		widget.NewFormItem("Favorite", wideField(favoriteCheck, 320)),
 	}
 
 	dialog.ShowForm("Add Server", "Add", "Cancel", form, func(ok bool) {
@@ -73,11 +75,12 @@ func showAddServerDialog(w fyne.Window, cfg *Config, onDone func()) {
 			rdpPort = "3389"
 		}
 		cfg.Servers = append(cfg.Servers, Server{
-			Name:    nameEntry.Text,
-			User:    userEntry.Text,
-			Host:    hostEntry.Text,
-			Port:    port,
-			RDPPort: rdpPort,
+			Name:     nameEntry.Text,
+			User:     userEntry.Text,
+			Host:     hostEntry.Text,
+			Port:     port,
+			RDPPort:  rdpPort,
+			Favorite: favoriteCheck.Checked,
 		})
 		cfg.Save()
 		onDone()
@@ -102,6 +105,8 @@ func showEditServerDialog(w fyne.Window, cfg *Config, index int, onDone func()) 
 	portEntry.SetText(original.Port)
 	rdpPortEntry := widget.NewEntry()
 	rdpPortEntry.SetText(original.RDPPortOrDefault())
+	favoriteCheck := widget.NewCheck("Favorite (show in Quick Connect)", nil)
+	favoriteCheck.SetChecked(original.Favorite)
 
 	form := []*widget.FormItem{
 		widget.NewFormItem("Server Name", wideField(nameEntry, 320)),
@@ -109,6 +114,7 @@ func showEditServerDialog(w fyne.Window, cfg *Config, index int, onDone func()) 
 		widget.NewFormItem("Host / IP", wideField(hostEntry, 320)),
 		widget.NewFormItem("SSH Port", wideField(portEntry, 120)),
 		widget.NewFormItem("RDP Port", wideField(rdpPortEntry, 120)),
+		widget.NewFormItem("Favorite", wideField(favoriteCheck, 320)),
 	}
 
 	dialog.ShowForm(fmt.Sprintf("Edit Server: %s", original.Name), "Save", "Cancel", form, func(ok bool) {
@@ -142,11 +148,14 @@ func showEditServerDialog(w fyne.Window, cfg *Config, index int, onDone func()) 
 			}
 		}
 		cfg.Servers[index] = Server{
-			Name:    newName,
-			User:    userEntry.Text,
-			Host:    hostEntry.Text,
-			Port:    port,
-			RDPPort: rdpPort,
+			Name:          newName,
+			User:          userEntry.Text,
+			Host:          hostEntry.Text,
+			Port:          port,
+			RDPPort:       rdpPort,
+			Favorite:      favoriteCheck.Checked,
+			LastConnected: original.LastConnected,
+			Bookmarks:     original.Bookmarks,
 		}
 		cfg.Save()
 		onDone()

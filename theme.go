@@ -28,7 +28,8 @@ var (
 )
 
 // uiZoom scales text/icon sizes for the Zoom In/Out controls. 1.0 = 100%.
-var uiZoom float32 = 1.0
+// Start at 70% zoom so the app opens in a compact view by default.
+var uiZoom float32 = 0.7
 
 const (
 	zoomMin  = float32(0.7)

@@ -1,15 +1,20 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"image/color"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
@@ -64,6 +69,40 @@ func promptPassphrase(parentWindow fyne.Window, keyfile string) (string, error) 
 		return p, nil
 	case <-cancelled:
 		return "", fmt.Errorf("passphrase entry cancelled for %s", keyfile)
+	}
+}
+
+func promptPassword(parentWindow fyne.Window) (string, error) {
+	if parentWindow == nil {
+		return "", fmt.Errorf("no UI available to prompt for SSH password")
+	}
+	passphrasePromptMu.Lock()
+	defer passphrasePromptMu.Unlock()
+
+	result := make(chan string, 1)
+	cancelled := make(chan struct{}, 1)
+
+	fyne.Do(func() {
+		entry := widget.NewPasswordEntry()
+		entry.SetPlaceHolder("password")
+		form := []*widget.FormItem{
+			widget.NewFormItem("Password", wideField(entry, 320)),
+		}
+		d := dialog.NewForm("SSH Password Required", "Connect", "Cancel", form, func(ok bool) {
+			if !ok {
+				cancelled <- struct{}{}
+				return
+			}
+			result <- entry.Text
+		}, parentWindow)
+		d.Show()
+	})
+
+	select {
+	case p := <-result:
+		return p, nil
+	case <-cancelled:
+		return "", fmt.Errorf("password entry cancelled")
 	}
 }
 
@@ -158,6 +197,24 @@ func sftpAuthMethods(parentWindow fyne.Window) []ssh.AuthMethod {
 		}))
 	}
 
+	methods = append(methods, ssh.PasswordCallback(func() (string, error) {
+		return promptPassword(parentWindow)
+	}))
+	methods = append(methods, ssh.KeyboardInteractive(func(user, instruction string, questions []string, echos []bool) ([]string, error) {
+		if len(questions) == 0 {
+			return nil, nil
+		}
+		password, err := promptPassword(parentWindow)
+		if err != nil {
+			return nil, err
+		}
+		responses := make([]string, len(questions))
+		for i := range responses {
+			responses[i] = password
+		}
+		return responses, nil
+	}))
+
 	return methods
 }
 
@@ -187,6 +244,9 @@ func sftpConnect(s Server, parentWindow fyne.Window) (*ssh.Client, *sftp.Client,
 	addr := net.JoinHostPort(s.Host, port)
 	sshClient, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "i/o timeout") || strings.Contains(err.Error(), "timeout") {
+			return nil, nil, fmt.Errorf("SSH connection to %s timed out; the host or port may be unreachable, blocked, or not accepting SSH on that port", addr)
+		}
 		return nil, nil, fmt.Errorf("SSH connection to %s failed: %w", addr, err)
 	}
 
@@ -199,16 +259,44 @@ func sftpConnect(s Server, parentWindow fyne.Window) (*ssh.Client, *sftp.Client,
 	return sshClient, sftpClient, nil
 }
 
+func launchFileZilla(s Server, log func(string)) {
+	port := s.Port
+	if port == "" {
+		port = "22"
+	}
+	uri := fmt.Sprintf("sftp://%s@%s:%s/", s.User, s.Host, port)
+	path, err := exec.LookPath("filezilla")
+	if err != nil {
+		log("✘ FileZilla is not installed or not on PATH. Install it and try again.")
+		return
+	}
+	cmd := exec.Command(path, uri)
+	if err := cmd.Start(); err != nil {
+		log(fmt.Sprintf("✘ Failed to launch FileZilla: %v", err))
+		return
+	}
+	log(fmt.Sprintf("Opened FileZilla for %s.", s.Name))
+}
+
 // openSFTPBrowser opens a new native window with a dual-pane file browser
 // for the given server. Connecting happens in the background so the window
 // appears immediately with a "Connecting..." indicator; connection or auth
 // errors are shown in that window AND logged, rather than failing silently.
-func openSFTPBrowser(s Server, appendLog func(string)) {
+func openSFTPBrowser(s Server, cfg *Config, appendLog func(string)) {
+	if cfg != nil {
+		cfg.MarkServerUsed(s.Name)
+	}
 	w := fyne.CurrentApp().NewWindow(fmt.Sprintf("SFTP: %s (%s@%s)", s.Name, s.User, s.Host))
 	w.Resize(fyne.NewSize(1040, 660))
 
 	statusLabel := widget.NewLabel(fmt.Sprintf("Connecting to %s@%s...", s.User, s.Host))
-	w.SetContent(container.NewCenter(statusLabel))
+	statusLabel.Wrapping = fyne.TextWrapWord
+	statusBox := container.NewVBox(
+		widget.NewLabelWithStyle("Connection status", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		statusLabel,
+	)
+	bg := canvas.NewRectangle(color.Black)
+	w.SetContent(container.NewMax(bg, container.NewCenter(statusBox)))
 	w.Show()
 
 	go func() {
@@ -217,16 +305,18 @@ func openSFTPBrowser(s Server, appendLog func(string)) {
 			msg := fmt.Sprintf("SFTP connection to '%s' failed: %v", s.Name, err)
 			appendLog("✘ " + msg)
 			statusLabel.SetText(msg)
+			statusLabel.TextStyle = fyne.TextStyle{Bold: true}
+			statusLabel.Refresh()
 			return
 		}
 		appendLog(fmt.Sprintf("Connected SFTP session to '%s' (%s@%s).", s.Name, s.User, s.Host))
 
 		w.SetOnClosed(func() {
-			sftpClient.Close()
-			sshClient.Close()
+			_ = sftpClient.Close()
+			_ = sshClient.Close()
 		})
 
-		content := buildSFTPBrowserContent(w, sftpClient, s, appendLog)
+		content := buildSFTPBrowserContent(w, sftpClient, s, cfg, appendLog)
 		w.SetContent(content)
 	}()
 }

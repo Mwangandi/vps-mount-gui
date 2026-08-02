@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
@@ -52,13 +54,23 @@ import (
 // stderr onto the PTY's stdout stream; a separate Stderr writer is
 // wrong for PTY sessions and would misroute stderr bytes into the SSH
 // session's stdin (which they'd never appear on).
-func openSSHTerminal(s Server, appendLog func(string)) {
+func openSSHTerminal(s Server, cfg *Config, appendLog func(string)) {
+	if cfg != nil {
+		cfg.MarkServerUsed(s.Name)
+	}
 	title := fmt.Sprintf("SSH: %s (%s@%s)", s.Name, s.User, s.Host)
 	w := fyne.CurrentApp().NewWindow(title)
 	w.Resize(fyne.NewSize(900, 560))
 
 	statusLabel := widget.NewLabel(fmt.Sprintf("Connecting to %s@%s...", s.User, s.Host))
-	w.SetContent(container.NewCenter(statusLabel))
+	statusLabel.Wrapping = fyne.TextWrapWord
+	statusBox := container.NewVBox(
+		widget.NewLabelWithStyle("Connection status", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		statusLabel,
+	)
+	bg := canvas.NewRectangle(color.Black)
+	statusArea := container.NewCenter(statusBox)
+	w.SetContent(container.NewMax(bg, statusArea))
 	w.Show()
 
 	go func() {
@@ -71,6 +83,8 @@ func openSSHTerminal(s Server, appendLog func(string)) {
 			msg := fmt.Sprintf("SSH connection to '%s' failed: %v", s.Name, err)
 			appendLog("✘ " + msg)
 			statusLabel.SetText(msg)
+			statusLabel.TextStyle = fyne.TextStyle{Bold: true}
+			statusLabel.Refresh()
 			return
 		}
 		_ = sftpClient.Close()
@@ -133,13 +147,22 @@ func openSSHTerminal(s Server, appendLog func(string)) {
 
 		// Resize propagation.
 		cfgCh := make(chan fyneterm.Config, 4)
+		doneCh := make(chan struct{})
 		term.AddListener(cfgCh)
 		go func() {
-			for cfg := range cfgCh {
-				if cfg.Rows == 0 || cfg.Columns == 0 {
-					continue
+			for {
+				select {
+				case cfg, ok := <-cfgCh:
+					if !ok {
+						return
+					}
+					if cfg.Rows == 0 || cfg.Columns == 0 {
+						continue
+					}
+					_ = session.WindowChange(int(cfg.Rows), int(cfg.Columns))
+				case <-doneCh:
+					return
 				}
-				_ = session.WindowChange(int(cfg.Rows), int(cfg.Columns))
 			}
 		}()
 
@@ -161,13 +184,16 @@ func openSSHTerminal(s Server, appendLog func(string)) {
 		})
 
 		w.SetOnClosed(func() {
+			// Clean up the SSH session and terminal resources without
+			// quitting the main app.
+			close(doneCh)
 			term.RemoveListener(cfgCh)
-			close(cfgCh)
 			_ = session.Close()
 			_ = sshClient.Close()
 		})
 
-		w.SetContent(container.NewBorder(toolbar, nil, nil, nil, term))
+		terminalContent := container.NewBorder(toolbar, nil, nil, nil, term)
+		w.SetContent(container.NewMax(bg, terminalContent))
 		appendLog(fmt.Sprintf("Connected SSH session to '%s' (%s@%s).", s.Name, s.User, s.Host))
 
 		go func() {

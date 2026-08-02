@@ -1,8 +1,13 @@
 package main
 
 import (
+	"fmt"
+
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
 )
 
 // MenuAction is one clickable line inside a sidebar section (or, when the
@@ -19,6 +24,49 @@ type MenuSection struct {
 	Title   string
 	Icon    fyne.Resource
 	Actions []MenuAction
+}
+
+func showQuickConnectDialog(w fyne.Window, cfg *Config, server Server, appendLog func(string), onChange func(), openTerminal func(Server)) {
+	if cfg == nil {
+		return
+	}
+	btnStyle := func(label string, action func()) *widget.Button {
+		btn := widget.NewButton(label, action)
+		btn.Importance = widget.HighImportance
+		return btn
+	}
+	content := container.NewVBox(
+		widget.NewLabelWithStyle(fmt.Sprintf("Quick Connect: %s", server.Name), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewLabel(fmt.Sprintf("%s@%s", server.User, server.Host)),
+		container.NewGridWithColumns(2,
+			btnStyle("SSH Terminal", func() {
+				cfg.MarkServerUsed(server.Name)
+				onChange()
+				openSSHTerminal(server, cfg, appendLog)
+			}),
+			btnStyle("SFTP Browser", func() {
+				cfg.MarkServerUsed(server.Name)
+				onChange()
+				openSFTPBrowser(server, cfg, appendLog)
+			}),
+			btnStyle("RDP", func() {
+				cfg.MarkServerUsed(server.Name)
+				onChange()
+				launchRDPWindow(server, appendLog)
+			}),
+			btnStyle("Local + Auto-SSH", func() {
+				cfg.MarkServerUsed(server.Name)
+				onChange()
+				openTerminal(server)
+			}),
+		),
+		widget.NewButton("Toggle Favorite", func() {
+			cfg.ToggleFavorite(server.Name)
+			onChange()
+		}),
+	)
+	d := dialog.NewCustom("Quick Connect", "Close", content, w)
+	d.Show()
 }
 
 // buildMenuSections constructs the sidebar contents fresh from current
@@ -85,15 +133,41 @@ func buildMenuSections(w fyne.Window, cfg *Config, appendLog func(string), onCha
 		unmountActions = append(unmountActions, MenuAction{Label: "(nothing mounted)", Disabled: true})
 	}
 
+	// ── Favorites ──
+	favoriteActions := make([]MenuAction, 0)
+	for _, s := range cfg.Favorites() {
+		s := s
+		favoriteActions = append(favoriteActions, MenuAction{Label: "★ " + s.Name, Action: func() {
+			showQuickConnectDialog(w, cfg, s, appendLog, onChange, openTerminal)
+		}})
+	}
+	for _, s := range cfg.RecentServers(5) {
+		s := s
+		favoriteActions = append(favoriteActions, MenuAction{Label: "⏱ " + s.Name, Action: func() {
+			showQuickConnectDialog(w, cfg, s, appendLog, onChange, openTerminal)
+		}})
+	}
+	if len(favoriteActions) == 0 {
+		favoriteActions = append(favoriteActions, MenuAction{Label: "(no favorites or recent servers)", Disabled: true})
+	}
+
 	// ── Servers ──
 	serverActions := []MenuAction{
 		{Label: "+ Add Server...", Action: func() { showAddServerDialog(w, cfg, onChange) }},
 	}
 	for i, s := range cfg.Servers {
 		i, s := i, s
+		label := "☆ Toggle Fav: " + s.Name
+		if s.Favorite {
+			label = "★ Toggle Fav: " + s.Name
+		}
 		serverActions = append(serverActions,
 			MenuAction{Label: "Edit: " + s.Name, Action: func() { showEditServerDialog(w, cfg, i, onChange) }},
 			MenuAction{Label: "Remove: " + s.Name, Action: func() { confirmRemoveServer(w, cfg, i, onChange) }},
+			MenuAction{Label: label, Action: func() {
+				cfg.ToggleFavorite(s.Name)
+				onChange()
+			}},
 		)
 	}
 
@@ -115,7 +189,11 @@ func buildMenuSections(w fyne.Window, cfg *Config, appendLog func(string), onCha
 	}
 	for _, s := range cfg.Servers {
 		s := s
-		terminalActions = append(terminalActions, MenuAction{Label: "SSH: " + s.Name, Action: func() { openTerminal(s) }})
+		terminalActions = append(terminalActions, MenuAction{Label: "SSH: " + s.Name, Action: func() {
+			cfg.MarkServerUsed(s.Name)
+			onChange()
+			openTerminal(s)
+		}})
 	}
 
 	// ── SSH: opens a real in-app terminal window per server, driven
@@ -124,7 +202,11 @@ func buildMenuSections(w fyne.Window, cfg *Config, appendLog func(string), onCha
 	sshActions := make([]MenuAction, 0, len(cfg.Servers))
 	for _, s := range cfg.Servers {
 		s := s
-		sshActions = append(sshActions, MenuAction{Label: s.Name, Action: func() { openSSHTerminal(s, appendLog) }})
+		sshActions = append(sshActions, MenuAction{Label: s.Name, Action: func() {
+			cfg.MarkServerUsed(s.Name)
+			onChange()
+			openSSHTerminal(s, cfg, appendLog)
+		}})
 	}
 	if len(cfg.Servers) == 0 {
 		sshActions = append(sshActions, MenuAction{Label: "(add a server first)", Disabled: true})
@@ -134,17 +216,25 @@ func buildMenuSections(w fyne.Window, cfg *Config, appendLog func(string), onCha
 	rdpActions := make([]MenuAction, 0, len(cfg.Servers))
 	for _, s := range cfg.Servers {
 		s := s
-		rdpActions = append(rdpActions, MenuAction{Label: s.Name, Action: func() { launchRDPWindow(s, appendLog) }})
+		rdpActions = append(rdpActions, MenuAction{Label: s.Name, Action: func() {
+			cfg.MarkServerUsed(s.Name)
+			onChange()
+			launchRDPWindow(s, appendLog)
+		}})
 	}
 	if len(cfg.Servers) == 0 {
 		rdpActions = append(rdpActions, MenuAction{Label: "(add a server first)", Disabled: true})
 	}
 
-	// ── SFTP: opens a native, in-app dual-pane browser per server ──
+	// ── SFTP: opens the in-app SFTP browser for the selected server ──
 	sftpActions := make([]MenuAction, 0, len(cfg.Servers))
 	for _, s := range cfg.Servers {
 		s := s
-		sftpActions = append(sftpActions, MenuAction{Label: s.Name, Action: func() { openSFTPBrowser(s, appendLog) }})
+		sftpActions = append(sftpActions, MenuAction{Label: s.Name, Action: func() {
+			cfg.MarkServerUsed(s.Name)
+			onChange()
+			openSFTPBrowser(s, cfg, appendLog)
+		}})
 	}
 	if len(cfg.Servers) == 0 {
 		sftpActions = append(sftpActions, MenuAction{Label: "(add a server first)", Disabled: true})
@@ -184,6 +274,7 @@ func buildMenuSections(w fyne.Window, cfg *Config, appendLog func(string), onCha
 	}
 
 	return []MenuSection{
+		{Title: "Favorites", Icon: theme.ConfirmIcon(), Actions: favoriteActions},
 		{Title: "Mount", Icon: theme.MoveUpIcon(), Actions: mountActions},
 		{Title: "Unmount", Icon: theme.MoveDownIcon(), Actions: unmountActions},
 		{Title: "Servers", Icon: theme.StorageIcon(), Actions: serverActions},
