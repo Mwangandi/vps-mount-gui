@@ -310,9 +310,17 @@ func downloadRecursive(client *sftp.Client, remoteRoot, localDestDir string, sta
 // their target's type but are not followed during recursive
 // upload/download (see uploadRecursive/downloadRecursive above).
 func buildSFTPBrowserContent(w fyne.Window, client *sftp.Client, s Server, cfg *Config, appendLog func(string)) fyne.CanvasObject {
-	localHome, err := os.UserHomeDir()
-	if err != nil || localHome == "" {
-		localHome = "/"
+	var localHome string
+	homeDir, err := os.UserHomeDir()
+	if err != nil || homeDir == "" {
+		homeDir = "/"
+	}
+	// Prefer Downloads folder when available
+	downloads := filepath.Join(homeDir, "Downloads")
+	if info, err := os.Stat(downloads); err == nil && info.IsDir() {
+		localHome = downloads
+	} else {
+		localHome = homeDir
 	}
 	remoteHome, err := client.Getwd()
 	if err != nil || remoteHome == "" {

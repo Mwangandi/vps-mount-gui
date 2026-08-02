@@ -37,6 +37,7 @@ func main() {
 	// ── Log pane ─────────────────────────────────────────────
 	logBox := widget.NewMultiLineEntry()
 	logBox.Wrapping = fyne.TextWrapWord
+	// Keep the entry disabled to avoid edits; provide a Copy button instead.
 	logBox.Disable()
 	latestActivity := ""
 
@@ -58,7 +59,11 @@ func main() {
 	zoomPercentLabel := widget.NewLabel("")
 	zoomOutBtn := widget.NewButtonWithIcon("", theme.ZoomOutIcon(), onZoomOut)
 	zoomInBtn := widget.NewButtonWithIcon("", theme.ZoomInIcon(), onZoomIn)
-	statusBarContent := container.NewHBox(statusBar, layout.NewSpacer(), zoomPercentLabel, zoomOutBtn, zoomInBtn)
+	copyLogBtn := widget.NewButtonWithIcon("Copy Log", theme.ContentCopyIcon(), func() {
+		fyne.CurrentApp().Clipboard().SetContent(logBox.Text)
+		appendLog("✔ Copied log to clipboard.")
+	})
+	statusBarContent := container.NewHBox(statusBar, layout.NewSpacer(), zoomPercentLabel, zoomOutBtn, zoomInBtn, copyLogBtn)
 	refreshStatusBar = func() {
 		mounted := 0
 		for _, t := range cfg.Targets {
@@ -139,15 +144,12 @@ func main() {
 	)
 
 	var refreshAll func()
-	openTerminal := func(server Server) {
+	openTerminalAction := func(server Server) {
 		if server.Host != "" {
 			cfg.MarkServerUsed(server.Name)
 			refreshAll()
 		}
-		openTerminalTab(tabs, server)
-	}
-	openEditor := func(rootPath, label string) {
-		openEditorTab(tabs, rootPath, label)
+		openTerminal(server)
 	}
 
 	// ── Sidebar (expandable / minimizable, replaces top menu) ──
@@ -159,7 +161,7 @@ func main() {
 	var rebuildSidebar func()
 
 	rebuildSidebar = func() {
-		sections := buildMenuSections(w, &cfg, appendLog, refreshAll, clearLog, openTerminal, openEditor)
+		sections := buildMenuSections(w, &cfg, appendLog, refreshAll, clearLog, openTerminalAction)
 		sidebarHolder.Objects = []fyne.CanvasObject{buildSidebar(w, sections, sidebarExpanded, func() {
 			sidebarExpanded = !sidebarExpanded
 			rebuildSidebar()

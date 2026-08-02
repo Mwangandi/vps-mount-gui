@@ -72,7 +72,7 @@ func showQuickConnectDialog(w fyne.Window, cfg *Config, server Server, appendLog
 // buildMenuSections constructs the sidebar contents fresh from current
 // state. Call it again (and rebuild the sidebar) any time targets/servers/
 // mount status change, so Mount/Unmount always reflect reality.
-func buildMenuSections(w fyne.Window, cfg *Config, appendLog func(string), onChange func(), clearLog func(), openTerminal func(Server), openEditor func(rootPath, label string)) []MenuSection {
+func buildMenuSections(w fyne.Window, cfg *Config, appendLog func(string), onChange func(), clearLog func(), openTerminal func(Server)) []MenuSection {
 	// ── Mount: lists targets that are NOT currently mounted ──
 	mountActions := []MenuAction{
 		{Label: "Mount All", Action: func() {
@@ -183,7 +183,7 @@ func buildMenuSections(w fyne.Window, cfg *Config, appendLog func(string), onCha
 		)
 	}
 
-	// ── Terminal: embedded local shell + one auto-SSH tab per server ──
+	// ── Terminal: opens standalone local shell and SSH terminal windows ──
 	terminalActions := []MenuAction{
 		{Label: "Local Shell", Action: func() { openTerminal(Server{}) }},
 	}
@@ -240,27 +240,6 @@ func buildMenuSections(w fyne.Window, cfg *Config, appendLog func(string), onCha
 		sftpActions = append(sftpActions, MenuAction{Label: "(add a server first)", Disabled: true})
 	}
 
-	// ── Editor: browse any currently-mounted target, or any folder ──
-	editorActions := []MenuAction{
-		{Label: "Browse Folder...", Action: func() { showBrowseFolderDialog(w, openEditor) }},
-	}
-	anyMountedForEditor := false
-	for _, t := range cfg.Targets {
-		t := t
-		if !isMounted(targetMountPath(cfg, t)) {
-			continue
-		}
-		anyMountedForEditor = true
-		editorActions = append(editorActions, MenuAction{Label: "Browse: " + t.Name, Action: func() {
-			openEditor(targetMountPath(cfg, t), t.Name)
-		}})
-		editorActions = append(editorActions, MenuAction{Label: "VS Code: " + t.Name, Action: func() {
-			openInVSCode(targetMountPath(cfg, t), appendLog)
-		}})
-	}
-	if !anyMountedForEditor {
-		editorActions = append(editorActions, MenuAction{Label: "(mount a target to browse it here)", Disabled: true})
-	}
 
 	// ── Settings ──
 	settingsActions := []MenuAction{
@@ -283,7 +262,6 @@ func buildMenuSections(w fyne.Window, cfg *Config, appendLog func(string), onCha
 		{Title: "SSH", Icon: theme.LoginIcon(), Actions: sshActions},
 		{Title: "RDP", Icon: theme.ViewFullScreenIcon(), Actions: rdpActions},
 		{Title: "SFTP", Icon: theme.UploadIcon(), Actions: sftpActions},
-		{Title: "Editor", Icon: theme.FileTextIcon(), Actions: editorActions},
 		{Title: "Settings", Icon: theme.SettingsIcon(), Actions: settingsActions},
 		{Title: "View", Icon: theme.ViewRefreshIcon(), Actions: viewActions},
 	}
